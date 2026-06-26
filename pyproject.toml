@@ -1,0 +1,7 @@
+[project]
+name = "campaign-copilot"
+version = "0.1.0"
+description = "Campaign Copilot: an LLM agent that helps a marketer go from a plain-English goal to a ready-to-launch campaign."
+readme = "README.md"
+requires-python = "==3.14"
+dependencies = []
