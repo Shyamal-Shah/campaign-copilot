@@ -1,0 +1,1 @@
+"""Campaign Copilot application package"""

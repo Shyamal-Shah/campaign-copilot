@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Campaign Copilot — generated app state
+app.sqlite
+app.sqlite-*
+.cache/
+*.embeddings.npz
+*.embeddings.json
+
+.docs
