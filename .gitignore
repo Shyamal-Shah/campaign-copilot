@@ -225,3 +225,4 @@ app.sqlite-*
 *.embeddings.json
 
 .docs
+.cache

@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     embed_api_key: str = ""
     embed_model: str = "text-embedding-3-small"
 
+    # --- Retrieval (RAG over the guidelines corpus) ---
+    guidelines_dir: str = "guidelines"
+    cache_dir: str = ".cache"
+    retrieval_top_k: int = 4
+
     # --- Agent run budgets ---
     max_turns: int = 8
     run_budget_s: float = 45.0
