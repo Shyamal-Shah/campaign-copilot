@@ -90,15 +90,45 @@ uv run pytest
   nothing to migrate.
 - **Normalized `user_features` table.** One row per (user, feature) makes adoption filters index-friendly
   `EXISTS` checks rather than `LIKE` over a packed string.
+- **Values sanitized in the read copy for index-friendly case-insensitivity.** The source `users` is
+  copied into the app DB with categoricals (country / platform / plan) and feature names lowercased and
+  indexed.
+
+### Segments
+
+- **Structured DSL compiled to parameterized SQL, never LLM-written SQL.** The model fills in a typed
+  segment definition and we compile it; there is no SQL-injection surface, the compiler is a pure
+  unit-testable function, and the definition canonicalizes cleanly for idempotency later.
+- **Typed, validated predicates.** Each predicate is a discriminated union on its `field` with allowed
+  operators and value shapes; an invalid field/op/value is rejected with `400`, not silently turned into
+  a wrong query.
+- **Size sanity flags (`empty` / `too_broad`).** A preview reports whether a segment is empty or covers
+  an implausibly large share of the base (> `MAX_SEGMENT_REACH`) - the cheapest guard against a
+  mis-defined "blast everyone" segment (it becomes a hard block at create time later).
+- **Source attached read-only for raw events.** `event_count` predicates run a windowed subquery over the
+  source `events` (236k rows, attached read-only - not worth copying); profile and behavioral predicates
+  hit our local, indexed read copies.
 
 ## Backend Engineering
 
 ### Data layer
 
-When the app DB is first created, we aggregate the event log into two derived tables in a separate
-`app.sqlite`: **`user_metrics`** (one row per user - last-activity timestamps, `days_since_*`, 30-day
-activity counts, `purchase_count`/`is_payer`, `total_events`, `lifecycle_stage`) and **`user_features`**
-(a normalized user↔feature set).
+When the app DB is first created, we populate it from the source in a separate `app.sqlite`: a
+lowercased, indexed **`users`** profile copy, plus two tables aggregated from the event log -
+**`user_metrics`** (one row per user - last-activity timestamps, `days_since_*`, 30-day activity counts,
+`purchase_count`/`is_payer`, `total_events`, `lifecycle_stage`) and **`user_features`** (a normalized
+user↔feature set).
+
+### Segments
+
+A segment is a flat `match` (`all`/`any`) over typed leaf predicates: profile (`country`/`plan`/
+`platform`), behavioral (`days_since_*`, `purchase_count`, `is_payer`, `lifecycle_stage`), feature
+adoption (`used`/`not_used_feature`), and windowed frequency (`event_count`). A pure compiler turns the
+definition into `(from, where, params)` with every value bound - profile predicates join `users`,
+behavioral ones read `user_metrics`, feature ones are `EXISTS` over `user_features`, and `event_count`
+is a windowed subquery over `events`. `POST /segments/preview` runs it and returns the count,
+`pct_of_base`, a small `users` sample, and the `empty`/`too_broad` flags - all with no LLM. Value
+matching is case-insensitive.
 
 ## Agent Design
 
@@ -150,6 +180,13 @@ that lexical matching alone wouldn't.
 - **Single-pass full build over incremental refresh.** Simpler and obviously correct, but the cost scales
   with the whole event log - fine at 236k rows, not for a large live one.
 
+### Segments
+
+- **Closed DSL over raw SQL.** Safe and unit-testable, but it can only express the predicates we model -
+  a deliberate boundary (arbitrary SQL is out of scope).
+- **Flat predicates for now.** `match: all|any` covers most goals; arbitrary boolean nesting and temporal
+  funnels are deferred upgrades.
+
 ## Known Limitations
 
 ### Data layer
@@ -163,6 +200,13 @@ that lexical matching alone wouldn't.
 - **One SQLite connection is shared across the request threadpool** (`check_same_thread=False`) - fine
   for a single process, not safe for multi-worker / multi-node writes.
 
+### Segments
+
+- **Flat only** - no nested boolean groups / `NOT`-groups, and no temporal "event A then B" funnels yet.
+- **Only lifecycle-stage values are validated** against a vocabulary; unknown country / feature / event
+  names just yield an empty match rather than a clear error.
+- **`event_count` is recomputed per query** over `events` (no materialized counts for arbitrary windows).
+
 ## Future Improvements
 
 ### Data layer
@@ -172,3 +216,10 @@ that lexical matching alone wouldn't.
   what changed - rather than computing from the full log.
 - **Source fingerprint to auto-rebuild.** Hash the source (size + mtime, plus the as-of date) so the
   read-models rebuild automatically when the dataset changes, instead of needing a manual reset.
+
+### Segments
+
+- **Arbitrary boolean trees + funnel predicates** - `(A or B) and not C`, and temporal sequences like
+  "added to cart then not purchased within 2h".
+- **Validate values against the live dataset vocabulary** (countries / features / event names) so a bad
+  input fails with a clear error instead of a silently-empty segment.

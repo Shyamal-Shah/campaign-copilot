@@ -23,10 +23,16 @@ GROUP BY u.user_id
 """
 
 _FEATURES_SQL = """
-SELECT DISTINCT user_id, json_extract(properties, '$.feature_name') AS feature
+SELECT DISTINCT user_id, LOWER(json_extract(properties, '$.feature_name')) AS feature
 FROM events
 WHERE event_name = 'feature_used'
   AND json_extract(properties, '$.feature_name') IS NOT NULL
+"""
+
+_USERS_SQL = """
+SELECT user_id, signup_date, LOWER(country) AS country, LOWER(platform) AS platform,
+       app_version, LOWER(plan) AS plan
+FROM users
 """
 
 
@@ -48,6 +54,7 @@ def build_metrics(
     try:
         agg_rows = src.execute(_AGG_SQL, {"w": window_30d}).fetchall()
         feature_rows = src.execute(_FEATURES_SQL).fetchall()
+        user_rows = src.execute(_USERS_SQL).fetchall()
     finally:
         src.close()
 
@@ -76,8 +83,14 @@ def build_metrics(
         )
 
     with app_conn:  # single transaction; full rebuild
+        app_conn.execute("DELETE FROM users")
         app_conn.execute("DELETE FROM user_metrics")
         app_conn.execute("DELETE FROM user_features")
+        app_conn.executemany(
+            "INSERT INTO users (user_id, signup_date, country, platform, app_version, plan) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [tuple(r) for r in user_rows],
+        )
         app_conn.executemany(
             """
             INSERT INTO user_metrics (
@@ -96,7 +109,9 @@ def build_metrics(
     return len(metrics)
 
 
-def ensure_metrics(app_conn: sqlite3.Connection, source_path: str, as_of_date: str) -> int:
+def ensure_metrics(
+    app_conn: sqlite3.Connection, source_path: str, as_of_date: str
+) -> int:
     """Build the read-models the first time the app DB has none; reuse them on later boots.
 
     Returns the ``user_metrics`` row count. The build is transactional, so a partial/interrupted

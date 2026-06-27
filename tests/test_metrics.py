@@ -1,12 +1,3 @@
-"""M1: the behavioural read-model build is correct — verified by logic, not by hardcoded counts.
-
-Pure unit tests: every case builds from a controlled, synthetic source (no real dataset, no global
-settings), so they stay hermetic and robust to the provided data changing. Three angles:
-  1. cross-check the build against an *independent* recomputation from the source (no magic numbers);
-  2. assert invariants that must hold for every row regardless of the data;
-  3. assert exact, known-by-construction values on a tiny synthetic source (the edge cases).
-"""
-
 import sqlite3
 from datetime import date, timedelta
 
@@ -35,11 +26,29 @@ _USERS = [
 _EVENTS = [
     ("e1", "u_active_payer", "app_open", "2026-06-23T09:00:00Z", "{}"),
     ("e2", "u_active_payer", "purchase", "2026-06-20T09:00:00Z", '{"amount": 4900}'),
-    ("e3", "u_active_payer", "feature_used", "2026-06-20T09:05:00Z", '{"feature_name": "voice_agent"}'),
-    ("e4", "u_active_payer", "feature_used", "2026-06-21T09:05:00Z", '{"feature_name": "voice_agent"}'),
+    (
+        "e3",
+        "u_active_payer",
+        "feature_used",
+        "2026-06-20T09:05:00Z",
+        '{"feature_name": "voice_agent"}',
+    ),
+    (
+        "e4",
+        "u_active_payer",
+        "feature_used",
+        "2026-06-21T09:05:00Z",
+        '{"feature_name": "voice_agent"}',
+    ),
     ("e5", "u_active_free", "app_open", "2026-06-22T09:00:00Z", "{}"),
     ("e6", "u_active_free", "session_start", "2026-06-22T09:01:00Z", "{}"),
-    ("e7", "u_lapsed_payer", "app_open", "2026-06-01T09:00:00Z", "{}"),  # 23d ago → not active(14)
+    (
+        "e7",
+        "u_lapsed_payer",
+        "app_open",
+        "2026-06-01T09:00:00Z",
+        "{}",
+    ),  # 23d ago → not active(14)
     ("e8", "u_lapsed_payer", "purchase", "2026-05-15T09:00:00Z", '{"amount": 9900}'),
     # u_never has no events at all; u_new only just opened the app
     ("e9", "u_new", "app_open", "2026-06-23T12:00:00Z", "{}"),
@@ -100,7 +109,9 @@ def test_built_rows_satisfy_invariants(tmp_path):
         == 0
     )
     assert (
-        conn.execute("SELECT COUNT(*) FROM user_metrics WHERE days_since_app_open < 0").fetchone()[0]
+        conn.execute(
+            "SELECT COUNT(*) FROM user_metrics WHERE days_since_app_open < 0"
+        ).fetchone()[0]
         == 0
     )
     # lifecycle_stage on the row always equals the single source of truth
@@ -141,16 +152,28 @@ def test_build_logic_on_synthetic_data(tmp_path):
     """Exact assertions on controlled data — the edge cases, known by construction (no magic numbers)."""
     as_of = "2026-06-24"
     users = [
-        ("u_new", "2026-06-20", "US", "iOS", "3.4.0", "free"),       # signed up 4 days ago
+        ("u_new", "2026-06-20", "US", "iOS", "3.4.0", "free"),  # signed up 4 days ago
         ("u_payer", "2025-01-01", "IN", "Android", "3.4.0", "pro"),  # active-ish payer
-        ("u_never", "2025-01-01", "US", "Web", "3.0.0", "free"),     # no events at all
+        ("u_never", "2025-01-01", "US", "Web", "3.0.0", "free"),  # no events at all
     ]
     events = [
         ("e1", "u_new", "app_open", "2026-06-23T10:00:00Z", "{}"),
         ("e2", "u_payer", "app_open", "2026-06-01T10:00:00Z", "{}"),
         ("e3", "u_payer", "purchase", "2026-06-02T10:00:00Z", '{"amount": 4900}'),
-        ("e4", "u_payer", "feature_used", "2026-06-02T10:00:00Z", '{"feature_name": "voice_agent"}'),
-        ("e5", "u_payer", "feature_used", "2026-06-03T10:00:00Z", '{"feature_name": "voice_agent"}'),
+        (
+            "e4",
+            "u_payer",
+            "feature_used",
+            "2026-06-02T10:00:00Z",
+            '{"feature_name": "voice_agent"}',
+        ),
+        (
+            "e5",
+            "u_payer",
+            "feature_used",
+            "2026-06-03T10:00:00Z",
+            '{"feature_name": "voice_agent"}',
+        ),
     ]
     source = _synthetic_source(tmp_path, users, events)
     conn = connect_app(":memory:")
@@ -175,14 +198,25 @@ def test_build_logic_on_synthetic_data(tmp_path):
 
     # feature adoption is deduped: voice_agent recorded once for u_payer
     feats = sorted(
-        (r["user_id"], r["feature"]) for r in conn.execute("SELECT user_id, feature FROM user_features")
+        (r["user_id"], r["feature"])
+        for r in conn.execute("SELECT user_id, feature FROM user_features")
     )
     assert feats == [("u_payer", "voice_agent")]
+
+    # profile copy is built, with categoricals lowercased for index-friendly case-insensitive filters
+    profile = dict(
+        conn.execute(
+            "SELECT country, plan FROM users WHERE user_id = 'u_payer'"
+        ).fetchone()
+    )
+    assert profile == {"country": "in", "plan": "pro"}  # source had "IN" / "pro"
 
 
 def test_ensure_metrics_builds_once(tmp_path):
     """First call populates the empty tables; a later call reuses them instead of rebuilding."""
-    source = _synthetic_source(tmp_path, [("u1", "2025-01-01", "US", "iOS", "3.4.0", "free")], [])
+    source = _synthetic_source(
+        tmp_path, [("u1", "2025-01-01", "US", "iOS", "3.4.0", "free")], []
+    )
     conn = connect_app(":memory:")
     init_schema(conn)
 

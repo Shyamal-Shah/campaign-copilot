@@ -3,11 +3,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.features.guidelines import service
 from app.features.segment.metrics import count_user_metrics, ensure_metrics
+from app.features.segment.router import router as segments_router
 from app.shared.config import get_settings
-from app.shared.db import connect_app, init_schema
+from app.shared.db import attach_source, connect_app, init_schema
 
 settings = get_settings()
 
@@ -18,6 +22,8 @@ async def lifespan(app: FastAPI):
     conn = connect_app(settings.app_db_path)
     init_schema(conn)
     ensure_metrics(conn, settings.source_db_path, settings.as_of_date)
+    # Attach the source read-only so segment queries can reach `users` / `events`.
+    attach_source(conn, settings.source_db_path)
     app.state.db = conn
     # 2. Guidelines retrieval index (requires an embedding provider; cache-backed, fails fast).
     service.init_store(settings)
@@ -33,6 +39,13 @@ app = FastAPI(
     summary="LLM agent that turns a plain-English marketing goal into a ready-to-launch campaign.",
     lifespan=lifespan,
 )
+app.include_router(segments_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return 400 Bad Request (not FastAPI's default 422) for invalid request bodies."""
+    return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
 
 
 @app.get("/health")

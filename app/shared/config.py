@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     cache_dir: str = ".cache"
     retrieval_top_k: int = 4
 
+    # --- Segments ---
+    max_segment_reach: float = 0.85  # too-broad sanity flag
+
     # --- Agent run budgets ---
     max_turns: int = 8
     run_budget_s: float = 45.0

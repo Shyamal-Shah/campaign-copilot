@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at    TEXT
 );
 
+-- Profile read copy.
+CREATE TABLE IF NOT EXISTS users (
+    user_id      TEXT PRIMARY KEY,
+    signup_date  TEXT,
+    country      TEXT,
+    platform     TEXT,
+    app_version  TEXT,
+    plan         TEXT
+);
+
 -- Derived per-user behavioral read-model, rebuilt from events at startup.
 CREATE TABLE IF NOT EXISTS user_metrics (
     user_id               TEXT PRIMARY KEY,
@@ -82,6 +92,9 @@ CREATE TABLE IF NOT EXISTS meta (
     value  TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_users_country         ON users(country);
+CREATE INDEX IF NOT EXISTS idx_users_platform        ON users(platform);
+CREATE INDEX IF NOT EXISTS idx_users_plan            ON users(plan);
 CREATE INDEX IF NOT EXISTS idx_user_metrics_dsa      ON user_metrics(days_since_app_open);
 CREATE INDEX IF NOT EXISTS idx_user_metrics_stage    ON user_metrics(lifecycle_stage);
 CREATE INDEX IF NOT EXISTS idx_user_features_feature ON user_features(feature);
@@ -90,15 +103,25 @@ CREATE INDEX IF NOT EXISTS idx_user_features_feature ON user_features(feature);
 
 def connect_app(path: str) -> sqlite3.Connection:
     """Open (creating if needed) the app database. ``check_same_thread=False`` so FastAPI's threadpool
-    can share the one connection."""
-    if path != ":memory:":
+    can share the one connection; file DBs use URI mode so the source can be ATTACHed read-only.
+    """
+    if path == ":memory:":
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+    else:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    if path != ":memory:":
+        conn = sqlite3.connect(f"file:{path}", uri=True, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def attach_source(conn: sqlite3.Connection, source_path: str) -> None:
+    """Attach the read-only source DB as ``src`` so segment queries can reach ``users`` / ``events``.
+
+    Requires a URI-mode connection (file DBs from ``connect_app``).
+    """
+    conn.execute("ATTACH DATABASE ? AS src", (f"file:{source_path}?mode=ro",))
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
