@@ -24,8 +24,10 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     # Comma-separated, primary first; any later entries act as fallbacks.
     llm_models: str = "openai/gpt-4o-mini"
-    llm_timeout_s: float = 30.0
-    llm_max_retries: int = 2
+    llm_timeout_s: float = 60.0
+    # SDK auto-retries on 429/5xx add uncontrolled latency against the wall-clock budget.
+    # Keep at 0 until M6 circuit breaker / fallback chain owns retry logic.
+    llm_max_retries: int = 0
 
     # --- Embeddings ---
     embed_base_url: str = ""
@@ -41,12 +43,10 @@ class Settings(BaseSettings):
     max_segment_reach: float = 0.85  # too-broad sanity flag
 
     # --- Agent run budgets ---
-    max_turns: int = 8
-    run_budget_s: float = 45.0
+    max_turns: int = 10
 
-    # --- Circuit breaker thresholds ---
-    breaker_fail_threshold: int = 3
-    breaker_cooldown_s: float = 15.0
+    # --- Cost estimate (observability) ---
+    cost_per_1k_tokens: float = 0.0  # blended $/1k tokens; 0 => report tokens only
 
     # --- Data / databases ---
     source_db_path: str = "data/data.sqlite"  # provided dataset, read-only

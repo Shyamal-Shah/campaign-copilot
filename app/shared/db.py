@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     message_json             TEXT,
     offer_json               TEXT,
     image_url                TEXT,
+    cited_guidelines_json    TEXT,
     idempotency_key          TEXT UNIQUE,
     trace_id                 TEXT,
     created_at               TEXT
@@ -31,7 +32,6 @@ CREATE TABLE IF NOT EXISTS campaigns (
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key            TEXT PRIMARY KEY,
     status         TEXT,                 -- in_progress | completed
-    request_hash   TEXT,
     campaign_id    TEXT,
     response_json  TEXT,
     created_at     TEXT,
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS runs (
     est_cost      REAL,
     campaign_id   TEXT,
     steps_json    TEXT,
+    message       TEXT,
     created_at    TEXT
 );
 
