@@ -75,9 +75,8 @@ def complete(
 def release(conn: sqlite3.Connection, key: str) -> None:
     """Drop an ``in_progress`` reservation so a client can retry after a failed run.
 
-    Only deletes rows still in flight — a ``completed`` key is never released. (A process that
-    crashes mid-run leaves a stuck ``in_progress`` row; reaping those via a TTL is a known
-    limitation, documented in DESIGN.)
+    Only deletes rows still in flight — a ``completed`` key is never released. A process that
+    crashes mid-run leaves a stuck ``in_progress`` row until manually cleared or reaped.
     """
     with conn:
         conn.execute(

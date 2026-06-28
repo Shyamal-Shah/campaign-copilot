@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import ScriptedModel, build_db, call, make_app, msg
+from conftest import ScriptedModel, build_db, call, make_app
 
 from app.core.agent.agent import build_agent
-from app.core.agent.types import AgentContext
+from app.core.agent.types import PlannerState
 from app.core.observability.trace import RunTrace
 from app.features.campaign import service as campaign_service
 from app.shared.config import get_settings
@@ -21,12 +19,13 @@ US_ONLY = {
 }
 
 
-def _draft() -> dict:
+def _create_args() -> dict:
+    # Flat create_campaign payload (no segment — it's read from PlannerState; flat message fields).
     return {
         "name": "Winback US",
-        "goal": "win back US users",
-        "segment": US_ONLY,
-        "message": {"kind": "push", "title": "We miss you", "body": "Here's 10% off"},
+        "channel": "push",
+        "title": "We miss you",
+        "body": "Here's 10% off",
         "offer": {"type": "discount", "value": "10%"},
         "rationale": "lapsed US users respond to a small incentive",
         "cited_guidelines": ["07", "13"],
@@ -34,23 +33,13 @@ def _draft() -> dict:
 
 
 def _created_turns(query: str) -> list[list]:
-    """A full plan: describe -> size -> retrieve -> create -> finalize."""
+    """A full plan: size -> retrieve -> create. A successful create_campaign ends the run
+    (tool_use_behavior), so there's no separate final-message turn — the outcome is read from
+    PlannerState, not a model-emitted CopilotOutcome."""
     return [
-        [call("c1", "describe_dataset", {})],
-        [call("c2", "query_segment", US_ONLY)],
-        [call("c3", "search_guidelines", {"query": query})],
-        [call("c4", "create_campaign", _draft())],
-        [
-            msg(
-                json.dumps(
-                    {
-                        "status": "created",
-                        "campaign": _draft(),
-                        "message": "Created winback campaign",
-                    }
-                )
-            )
-        ],
+        [call("c1", "query_segment", US_ONLY)],
+        [call("c2", "search_guidelines", {"query": query})],
+        [call("c3", "create_campaign", _create_args())],
     ]
 
 
@@ -58,17 +47,16 @@ def _created_turns(query: str) -> list[list]:
 async def test_runner_loop_creates_grounded_campaign(tmp_path, recorded_guidelines):
     conn = build_db(tmp_path)
     model = ScriptedModel(_created_turns(recorded_guidelines))
-    ctx = AgentContext(db=conn, settings=get_settings(), trace=RunTrace())
+    ctx = PlannerState(db=conn, settings=get_settings(), trace=RunTrace())
 
-    result = await Runner.run(
-        build_agent(model), "win back US users", context=ctx, max_turns=8
+    await Runner.run(
+        build_agent(model, conn, get_settings()), "win back US users", context=ctx, max_turns=8
     )
 
-    assert result.final_output.status == "created"
+    # Outcome is grounded in PlannerState (create_campaign set campaign_id), not the model's text.
     assert ctx.campaign_id is not None
     step_names = [s.name for s in ctx.trace.steps]
     assert {
-        "describe_dataset",
         "query_segment",
         "search_guidelines",
         "create_campaign",
@@ -80,7 +68,7 @@ async def test_runner_loop_creates_grounded_campaign(tmp_path, recorded_guidelin
 def test_http_run_persists_trace_and_is_idempotent(tmp_path, recorded_guidelines):
     conn = build_db(tmp_path)
     model = ScriptedModel(_created_turns(recorded_guidelines))
-    client = TestClient(make_app(conn, agent=build_agent(model)))
+    client = TestClient(make_app(conn, agent=build_agent(model, conn, get_settings())))
     headers = {"Idempotency-Key": "run-1"}
 
     # POST returns 202 immediately; BackgroundTask runs synchronously inside TestClient.
@@ -112,19 +100,17 @@ def test_http_run_persists_trace_and_is_idempotent(tmp_path, recorded_guidelines
 
 def test_out_of_dsl_goal_declines_cleanly(tmp_path):
     conn = build_db(tmp_path)
+    # The agent declines by calling the terminal `finish` tool — not a free-text outcome.
     turns = [
         [
-            msg(
-                json.dumps(
-                    {
-                        "status": "unsupported",
-                        "message": "lookalike segments aren't supported by the DSL",
-                    }
-                )
+            call(
+                "f1",
+                "finish",
+                {"status": "unsupported", "message": "lookalike segments aren't supported by the DSL"},
             )
         ]
     ]
-    client = TestClient(make_app(conn, agent=build_agent(ScriptedModel(turns))))
+    client = TestClient(make_app(conn, agent=build_agent(ScriptedModel(turns), conn, get_settings())))
 
     r = client.post(
         "/copilot/run",
@@ -139,9 +125,8 @@ def test_out_of_dsl_goal_declines_cleanly(tmp_path):
 
 
 def test_missing_idempotency_key_is_400(tmp_path):
-    client = TestClient(
-        make_app(build_db(tmp_path), agent=build_agent(ScriptedModel([])))
-    )
+    conn = build_db(tmp_path)
+    client = TestClient(make_app(conn, agent=build_agent(ScriptedModel([]), conn, get_settings())))
     assert client.post("/copilot/run", json={"goal": "x"}).status_code == 400
 
 

@@ -139,7 +139,7 @@ def test_profile_filter_is_local_and_case_insensitive(tmp_path):
 
 
 def test_winback_example_on_real_data_is_in_expected_range():
-    """The assignment's win-back goal (active last month, not opened in 14 days) → ~996–1514 users."""
+    """Test win-back goal (active last month, not opened in 14 days) → ~996–1514 users."""
     s = get_settings()
     conn = connect_app(":memory:")
     init_schema(conn)

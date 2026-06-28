@@ -52,12 +52,10 @@ def search_guidelines(ctx: PlannerState, args: SearchGuidelinesArgs) -> dict:
 
 # --- tool 3: create_campaign (idempotent insert; grounds size + enforces reach cap) ---
 class CreateCampaignArgs(BaseModel):
-    """The agent's create payload, kept deliberately FLAT so weaker models fill it reliably:
+    """Payload for creating a campaign.
 
-    - no ``segment`` — the audience is taken from the last ``query_segment`` (§4a grounding), so
-      the model never re-types the recursive DSL;
-    - the message is flat fields (``title``/``body``/…), not a discriminated union — we assemble the
-      channel-appropriate message object here.
+    - The audience segment is read from session state populated by the last ``query_segment`` call.
+    - Message fields (``title``/``body``/…) are provided flat and assembled into the appropriate channel structure internally.
     """
 
     name: str = Field(min_length=1, max_length=120)

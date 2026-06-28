@@ -5,7 +5,7 @@ import time
 import pytest
 from pydantic import BaseModel
 
-from app.core.agent.types import AgentContext
+from app.core.agent.types import PlannerState
 from app.core.agent.executor import ToolExecutor, ToolSpec
 from app.core.observability.trace import RunTrace
 from app.shared.config import get_settings
@@ -15,8 +15,8 @@ class Args(BaseModel):
     x: int
 
 
-def _ctx() -> AgentContext:
-    return AgentContext(db=None, settings=get_settings(), trace=RunTrace())
+def _ctx() -> PlannerState:
+    return PlannerState(db=None, settings=get_settings(), trace=RunTrace())
 
 
 def _spec(impl, **over) -> ToolSpec:

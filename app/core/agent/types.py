@@ -18,6 +18,7 @@ class PlannerState:
 
     db: sqlite3.Connection
     settings: Settings
+    trace: RunTrace
     requested_name: str | None = None
     channel_hint: str | None = None
     segment: SegmentDefinition | None = None
