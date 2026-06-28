@@ -25,18 +25,17 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-    # 1. Behavioural read-models from the events log
+    # 1. Behavioral read-models from the events log
     conn = connect_app(settings.app_db_path)
     init_schema(conn)
     ensure_metrics(conn, settings.source_db_path, settings.as_of_date)
-    # Attach the source read-only so segment queries can reach `users` / `events`.
     attach_source(conn, settings.source_db_path)
     app.state.db = conn
-    # 2. Guidelines retrieval index (requires an embedding provider; cache-backed, fails fast).
+    # 2. Guidelines retrieval index.
     service.init_store(settings)
-    # 3. Build the agent over the primary chat model (None when no LLM is configured).
+    # 3. Build the agent over the primary chat model.
     model = make_chat_model(settings)
-    app.state.agent = build_agent(model) if model is not None else None
+    app.state.agent = build_agent(model, conn, settings) if model is not None else None
     try:
         yield
     finally:

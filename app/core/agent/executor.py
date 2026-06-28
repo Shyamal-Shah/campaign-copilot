@@ -11,9 +11,10 @@ from agents import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from pydantic import BaseModel, ValidationError
 
-from app.core.agent.types import AgentContext
+from app.core.agent.types import PlannerState
+from app.core.observability.logging import log_event
 
-ToolImpl = Callable[[AgentContext, BaseModel], Any]  # sync; run via asyncio.to_thread
+ToolImpl = Callable[[PlannerState, BaseModel], Any]  # sync; run via asyncio.to_thread
 
 
 @dataclass
@@ -48,7 +49,7 @@ class ToolExecutor:
         return [self._build(spec) for spec in self._specs]
 
     def _build(self, spec: ToolSpec) -> FunctionTool:
-        async def on_invoke(ctx: ToolContext[AgentContext], args_json: str) -> Any:
+        async def on_invoke(ctx: ToolContext[PlannerState], args_json: str) -> Any:
             return await self._invoke(spec, ctx.context, args_json)
 
         return FunctionTool(
@@ -60,7 +61,7 @@ class ToolExecutor:
         )
 
     async def _invoke(
-        self, spec: ToolSpec, agent_ctx: AgentContext, args_json: str
+        self, spec: ToolSpec, agent_ctx: PlannerState, args_json: str
     ) -> Any:
         trace = agent_ctx.trace
         t0 = perf_counter()
@@ -82,6 +83,8 @@ class ToolExecutor:
                 "error": "invalid_arguments",
                 "detail": json.loads(exc.json()),
             }
+
+        log_event(trace.trace_id, "tool_call", name=spec.name, args=args.model_dump())
 
         # 2. Run off the event loop with a timeout, retrying a bounded number of times.
         last_exc: Exception | None = None

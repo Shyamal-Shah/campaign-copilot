@@ -6,9 +6,16 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.features.segment.dsl import SegmentDefinition
-from app.shared.config import get_settings
 
 Channel = Literal["push", "email", "in_app"]
+
+
+def _require_https(url: str | None) -> str | None:
+    if url is None:
+        return None
+    if urlparse(url).scheme != "https":
+        raise ValueError(f"link must use HTTPS; got {url!r}")
+    return url
 
 
 # --- channel-specific message bodies (discriminated by `kind`) ---
@@ -18,6 +25,8 @@ class PushMessage(BaseModel):
     body: str = Field(max_length=120)  # doc-03 hard limit
     image_url: str | None = None
     deep_link: str | None = None
+
+    validate_links = field_validator("image_url", "deep_link", mode="before")(_require_https)
 
 
 class EmailMessage(BaseModel):

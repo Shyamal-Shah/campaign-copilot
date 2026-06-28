@@ -1,99 +1,123 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+import json
+from typing import Literal
 
-from app.core.agent.types import AgentContext
+from pydantic import BaseModel, Field, ValidationError
+
+from app.core.agent.types import PlannerState
 from app.core.agent.executor import ToolExecutor, ToolSpec
 from app.features.campaign import service as campaign_service
-from app.features.campaign.models import CampaignDraft
+from app.features.campaign.models import (
+    CampaignDraft,
+    CampaignMessage,
+    Channel,
+    EmailMessage,
+    InAppMessage,
+    Offer,
+    PushMessage,
+)
 from app.features.guidelines.service import search_guidelines as rag_search
 from app.features.segment.dsl import SegmentDefinition
-from app.features.segment.lifecycle import STAGES
 from app.features.segment.service import preview_segment
 
-# The DSL vocabulary advertised to the model so it builds valid predicates instead of guessing.
-_PREDICATE_FIELDS = [
-    {"field": "country|platform|plan", "ops": ["in", "not_in"], "on": "profile"},
-    {"field": "lifecycle_stage", "ops": ["in", "not_in"], "values": list(STAGES)},
-    {"field": "days_since_app_open|days_since_any_event", "ops": ["gte", "lte", "eq", "between"]},
-    {"field": "purchase_count", "ops": ["gte", "lte", "eq", "between"]},
-    {"field": "is_payer", "ops": ["value: true|false"]},
-    {"field": "used_feature|not_used_feature", "args": ["feature"]},
-    {"field": "event_count", "args": ["event_name", "window_days?", "op: gte|lte", "value"]},
-]
 
-
-# --- tool 1: describe_dataset (no LLM; anti-hallucination grounding of the vocabulary) ---
-class DescribeDatasetArgs(BaseModel):
-    """No arguments — returns the dataset's real vocabulary and size."""
-
-
-def _distinct(db, col: str, table: str) -> list[str]:
-    rows = db.execute(
-        f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL ORDER BY {col}"
-    ).fetchall()
-    return [r[0] for r in rows]
-
-
-def describe_dataset(ctx: AgentContext, args: DescribeDatasetArgs) -> dict:
-    db = ctx.db
-    try:
-        events = [r[0] for r in db.execute(
-            "SELECT DISTINCT event_name FROM events ORDER BY event_name"
-        ).fetchall()]
-    except Exception:
-        events = []  # source events not reachable (e.g. an isolated test DB)
-    total = db.execute("SELECT COUNT(*) FROM user_metrics").fetchone()[0]
-    return {
-        "total_users": total,
-        "as_of_date": ctx.settings.as_of_date,
-        "categoricals": {
-            "country": _distinct(db, "country", "users"),
-            "platform": _distinct(db, "platform", "users"),
-            "plan": _distinct(db, "plan", "users"),
-        },
-        "lifecycle_stages": list(STAGES),
-        "features": _distinct(db, "feature", "user_features"),
-        "event_names": events,
-        "predicate_fields": _PREDICATE_FIELDS,
-        "note": "Build segments only from these fields/values; values are matched lower-case.",
-    }
-
-
-# --- tool 2: query_segment (DSL -> SQL count + sample; the grounded segment size) ---
-def query_segment(ctx: AgentContext, args: SegmentDefinition) -> dict:
+# --- tool 1: query_segment (DSL -> SQL count + sample; the grounded segment size) ---
+def query_segment(ctx: PlannerState, args: SegmentDefinition) -> dict:
     result = preview_segment(
         ctx.db, args, ctx.settings.as_of_date, ctx.settings.max_segment_reach
     )
+    if not result.empty and not result.too_broad:
+        ctx.segment = args
     return result.model_dump()
 
 
-# --- tool 3: search_guidelines (RAG; cite real doc_ids) ---
+# --- tool 2: search_guidelines (RAG; cite real doc_ids) ---
 class SearchGuidelinesArgs(BaseModel):
     query: str
     k: int | None = None
 
 
-def search_guidelines(ctx: AgentContext, args: SearchGuidelinesArgs) -> dict:
+def search_guidelines(ctx: PlannerState, args: SearchGuidelinesArgs) -> dict:
     results = rag_search(args.query, args.k)
     return {
         "query": args.query,
         "results": [
             {"doc_id": r.doc_id, "title": r.title, "score": round(r.score, 4),
-             "snippet": r.text[:300]}
+             "text": r.text}
             for r in results
         ],
     }
 
 
-# --- tool 4: create_campaign (idempotent insert; grounds size + enforces reach cap) ---
-def create_campaign(ctx: AgentContext, args: CampaignDraft) -> dict:
+# --- tool 3: create_campaign (idempotent insert; grounds size + enforces reach cap) ---
+class CreateCampaignArgs(BaseModel):
+    """The agent's create payload, kept deliberately FLAT so weaker models fill it reliably:
+
+    - no ``segment`` — the audience is taken from the last ``query_segment`` (§4a grounding), so
+      the model never re-types the recursive DSL;
+    - the message is flat fields (``title``/``body``/…), not a discriminated union — we assemble the
+      channel-appropriate message object here.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    channel: Channel = "push"
+    title: str = ""  # push/in_app headline; for email, the subject line is used
+    body: str
+    subject: str | None = None  # email only (falls back to title)
+    preheader: str | None = None  # email only
+    cta_text: str | None = None  # in_app only
+    image_url: str | None = None  # push only
+    deep_link: str | None = None
+    offer: Offer | None = None
+    rationale: str = ""
+    cited_guidelines: list[str] = Field(default_factory=list)
+
+
+def _build_message(args: CreateCampaignArgs) -> CampaignMessage:
+    """Assemble the channel-appropriate message from flat args (length limits enforced here)."""
+    if args.channel == "email":
+        return EmailMessage(
+            subject=args.subject or args.title, preheader=args.preheader,
+            body=args.body, deep_link=args.deep_link,
+        )
+    if args.channel == "in_app":
+        return InAppMessage(
+            title=args.title, body=args.body, cta_text=args.cta_text, deep_link=args.deep_link,
+        )
+    return PushMessage(
+        title=args.title, body=args.body, image_url=args.image_url, deep_link=args.deep_link,
+    )
+
+
+def create_campaign(ctx: PlannerState, args: CreateCampaignArgs) -> dict:
     # Run-level dedupe: if a campaign was already created this run, don't create a second.
     if ctx.campaign_id:
         return {"status": "already_created", "campaign_id": ctx.campaign_id}
+    if ctx.segment is None:
+        return {
+            "status": "error",
+            "error": "no_segment",
+            "detail": "call query_segment first to define and size the audience",
+        }
+    try:
+        # Channel/limit violations (e.g. push title >50) become a typed, correctable error.
+        message = _build_message(args)
+    except ValidationError as exc:
+        return {"status": "error", "error": "invalid_message", "detail": json.loads(exc.json())}
+    draft = CampaignDraft(
+        # Honor the marketer's requested name verbatim when they gave one; otherwise the model's.
+        name=ctx.requested_name or args.name,
+        goal=ctx.trace.goal,
+        segment=ctx.segment,  # grounded: the exact segment query_segment sized
+        message=message,
+        offer=args.offer,
+        rationale=args.rationale,
+        cited_guidelines=args.cited_guidelines,
+    )
     try:
         campaign = campaign_service.create_campaign(
-            ctx.db, args,
+            ctx.db, draft,
             as_of_date=ctx.settings.as_of_date,
             max_reach=ctx.settings.max_segment_reach,
             trace_id=ctx.trace.trace_id,
@@ -110,8 +134,21 @@ def create_campaign(ctx: AgentContext, args: CampaignDraft) -> dict:
     }
 
 
-def _summ_describe(p: dict) -> str:
-    return f"{p.get('total_users')} users; {len(p.get('event_names', []))} event types"
+# --- tool 4: finish (terminal decline; the run's outcome when no campaign is created) ---
+class FinishArgs(BaseModel):
+    status: Literal["unsupported", "needs_clarification"]
+    message: str = ""
+
+
+def finish(ctx: PlannerState, args: FinishArgs) -> dict:
+    """End the run WITHOUT a campaign. Records the decline on PlannerState so the router reports it.
+
+    Use ``unsupported`` when the goal can't be expressed in the segment DSL or isn't a campaign
+    request, ``needs_clarification`` (with one specific question in ``message``) when it's ambiguous.
+    """
+    ctx.finish_status = args.status
+    ctx.finish_message = args.message
+    return {"status": args.status, "message": args.message}
 
 
 def _summ_segment(p: dict) -> str:
@@ -127,13 +164,13 @@ def _summ_create(p: dict) -> str:
     return f"{p.get('status')} {p.get('campaign_id', p.get('error', ''))}"
 
 
+def _summ_finish(p: dict) -> str:
+    return f"{p.get('status')}: {p.get('message', '')[:60]}"
+
+
 def build_executor() -> ToolExecutor:
     """Register the four tools with their timeouts and trace summarizers."""
     return ToolExecutor([
-        ToolSpec("describe_dataset",
-                 "Return the dataset's real vocabulary (countries, platforms, plans, lifecycle "
-                 "stages, features, event names) and the segment predicate fields. Call this first.",
-                 DescribeDatasetArgs, describe_dataset, timeout_s=5.0, summarize=_summ_describe),
         ToolSpec("query_segment",
                  "Compile a structured SegmentDefinition to SQL and return the matching user count, "
                  "percentage of base, and a sample. Use this to size a segment before creating.",
@@ -143,7 +180,15 @@ def build_executor() -> ToolExecutor:
                  "Issue several targeted queries across facets (channel, copy limits, offers).",
                  SearchGuidelinesArgs, search_guidelines, timeout_s=15.0, summarize=_summ_search),
         ToolSpec("create_campaign",
-                 "Create the campaign from a validated draft. Grounds segment_size in a real query "
-                 "and rejects segments over the reach cap; returns the new campaign_id.",
-                 CampaignDraft, create_campaign, timeout_s=10.0, summarize=_summ_create),
+                 "Create the campaign for the audience you most recently sized with query_segment "
+                 "(do NOT pass the segment again — it's taken from that result). Give flat fields: "
+                 "channel (push|email|in_app, default push), title and body as separate strings "
+                 "(push: title ≤50, body ≤120), optional offer, rationale, and cited_guidelines "
+                 "doc_ids. Returns the new campaign_id; calling this successfully ENDS the run.",
+                 CreateCampaignArgs, create_campaign, timeout_s=10.0, summarize=_summ_create),
+        ToolSpec("finish",
+                 "End the run WITHOUT creating a campaign. Use status='unsupported' when the goal "
+                 "can't be expressed in the segment DSL or isn't a campaign request, or "
+                 "'needs_clarification' with one specific question. This ENDS the run.",
+                 FinishArgs, finish, timeout_s=5.0, summarize=_summ_finish),
     ])

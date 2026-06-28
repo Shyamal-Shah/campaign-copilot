@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
+from app.core.observability.logging import log_event
+
 
 def new_trace_id() -> str:
     return f"run_{uuid.uuid4().hex}"
@@ -27,9 +29,7 @@ class RunTrace(BaseModel):
 
     trace_id: str = Field(default_factory=new_trace_id)
     goal: str = ""
-    status: str = (
-        "in_progress"  # in_progress | created | unsupported | needs_clarification | error
-    )
+    status: str = "in_progress"  # in_progress | created | unsupported  | error
     degraded: bool = False
     campaign_id: str | None = None
     total_ms: float | None = None
@@ -62,6 +62,12 @@ class RunTrace(BaseModel):
             detail=detail,
         )
         self.steps.append(step)
+        fields: dict = {"seq": step.seq, "kind": kind, "name": name, "status": status}
+        if step.latency_ms is not None:
+            fields["latency_ms"] = step.latency_ms
+        if summary:
+            fields["summary"] = summary
+        log_event(self.trace_id, "step", **fields)
         return step
 
 

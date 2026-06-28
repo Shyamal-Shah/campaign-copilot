@@ -25,9 +25,7 @@ class Settings(BaseSettings):
     # Comma-separated, primary first; any later entries act as fallbacks.
     llm_models: str = "openai/gpt-4o-mini"
     llm_timeout_s: float = 60.0
-    # SDK auto-retries on 429/5xx add uncontrolled latency against the wall-clock budget.
-    # Keep at 0 until M6 circuit breaker / fallback chain owns retry logic.
-    llm_max_retries: int = 0
+    llm_max_retries: int = 3
 
     # --- Embeddings ---
     embed_base_url: str = ""
@@ -44,6 +42,7 @@ class Settings(BaseSettings):
 
     # --- Agent run budgets ---
     max_turns: int = 10
+    run_budget_s: float = 60.0
 
     # --- Cost estimate (observability) ---
     cost_per_1k_tokens: float = 0.0  # blended $/1k tokens; 0 => report tokens only

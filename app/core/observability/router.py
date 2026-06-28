@@ -21,3 +21,18 @@ def get_run_trace(trace_id: str, request: Request) -> dict:
         run["campaign"] = campaign.model_dump() if campaign else None
 
     return run
+
+
+@router.get("/runs")
+def list_runs(request: Request) -> list[dict]:
+    conn = request.app.state.db
+    import json
+
+    rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
+    runs = []
+    for row in rows:
+        out = dict(row)
+        out["degraded"] = bool(out["degraded"])
+        out["steps"] = json.loads(out.pop("steps_json") or "[]")
+        runs.append(out)
+    return runs
