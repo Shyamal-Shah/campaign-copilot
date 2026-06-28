@@ -68,13 +68,6 @@ and the embedding endpoint/key.
 uv run uvicorn main:app --reload
 ```
 
-### Embed Guidelines
-
-> Manually embed the guidelines to pre-warm the cache (e.g. in a Docker build) or re-embed after editing a guideline.
-
-```bash
-uv run campaign-ingest
-```
 
 Then check it's up:
 
@@ -84,11 +77,30 @@ curl http://127.0.0.1:8000/health
 
 Interactive API docs are at <http://127.0.0.1:8000/docs>.
 
+
+## Embed Guidelines
+
+> Manually embed the guidelines to pre-warm the cache (e.g. in a Docker build) or re-embed after editing a guideline.
+
+```bash
+uv run campaign-ingest
+```
+
 ## Test
 
 ```bash
 uv run pytest
 ```
+
+## Eval
+
+```bash
+uv run campaign-eval          # Tier A always (deterministic, no network); Tier B when LLM_*/EMBED_* are set
+```
+
+Prints a per-case + aggregate scorecard, writes [eval/REPORT.md](eval/REPORT.md), and exits non-zero on
+any Tier-A failure (so it doubles as a CI gate). See [Evaluation](#evaluation) for the approach and
+metrics.
 
 ---
 
@@ -293,6 +305,30 @@ guidelines land in the top-k; the dense half also covers a paraphrase ("how ofte
 that lexical matching alone wouldn't.
 
 ## Evaluation
+
+A small harness in [`eval/`](eval/) measures whether the agent produces *reasonable* segments and
+campaigns — the instinct to measure quality in a non-deterministic system, not a full eval framework.
+The latest run is committed at **[eval/REPORT.md](eval/REPORT.md)**; regenerate with:
+
+```bash
+uv run campaign-eval          # Tier A always; Tier B when LLM_*/EMBED_* are set
+```
+
+**Two tiers.** *Tier A* is deterministic and needs no network: it drives the **real** compiler,
+hybrid retrieval (via the committed embeddings fixture), and agent loop over the **real dataset**, with
+a scripted model standing in for the LLM — so grounding/idempotency/observability are checked on every
+run and the command doubles as a CI gate (non-zero exit on any Tier-A failure). *Tier B* runs only when
+a provider is configured: it sends each plain-English goal to the **actual agent** and scores the
+outcome with range/shape assertions (never a magic count).
+
+**Seven metrics**, per [`eval/golden_cases.py`](eval/golden_cases.py) and read mostly straight from the
+persisted `RunTrace`: five pass/fail checks — **grounding** (a campaign's size/citations come from real
+tool effects, not the model's prose), **segment** (real-data count in the expected range *and* shape),
+**citations** (recall@k: expected `doc_id`s ⊆ retrieved), **dedupe** (a retried key never
+double-creates), **declines** (an out-of-DSL "lookalike" goal refuses cleanly with no campaign) — plus
+three distributions: **latency**, **tool count** (no runaway loop), and **token usage**. Counts are
+anchored to the real data (payers≈809, active≤14d≈3262) but asserted as **ranges**, so a
+different-but-valid segment still passes.
 
 ## Tradeoffs
 
