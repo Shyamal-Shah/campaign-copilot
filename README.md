@@ -6,11 +6,113 @@ grounds itself in the messaging guidelines (RAG), and drafts + idempotently crea
 
 ## Architecture
 
+The diagram below maps the backend request flow, agent loop orchestration, RAG retrieval system, and database interfaces:
+
+```mermaid
+flowchart TD
+    subgraph FastAPI ["FastAPI Request Handler"]
+        POST["POST /copilot/run"]
+        IDEM["idempotency.py (reserve key)"]
+        BG["asyncio Background Task"]
+        GET_RUNS["GET /runs/{trace_id}"]
+    end
+
+    subgraph AgentSystem ["Agentic Core (Agents SDK)"]
+        RUNNER["Runner.run() loop"]
+        STATE["PlannerState (mutable context)"]
+        HOOKS["TracingHooks (captures LLM I/O)"]
+        SYS_PROMPT["prompts.py (dynamic prompt + schemas)"]
+        EXEC["ToolExecutor (arg validation + timing)"]
+    end
+
+    subgraph Tools ["Agent Tools"]
+        T_SEG["query_segment"]
+        T_RAG["search_guidelines"]
+        T_CAMP["create_campaign (terminal)"]
+        T_FIN["finish (terminal)"]
+    end
+
+    subgraph Fallback ["Graceful Recovery"]
+        DEGRADED["fallback.py (degraded planner)"]
+        KW_DSL["Keyword to DSL parser"]
+    end
+
+    subgraph Features ["Feature Implementations"]
+        COMPILER["segment/compiler.py (DSL to SQL compiler)"]
+        RAG["guidelines/store.py (fused dense + BM25 search)"]
+        CAMP_SERV["campaign/service.py (campaign creation + reach capping)"]
+    end
+
+    subgraph Storage ["Storage Layer"]
+        APP_DB[("app.sqlite (campaigns, runs, user_metrics, idempotency)")]
+        SRC_DB[("data.sqlite (read-only users & events)")]
+        RAG_CACHE["disk cache (embeddings cached by corpus hash)"]
+        MD_FILES["guidelines/*.md (marketing playbooks)"]
+    end
+
+    POST --> IDEM
+    IDEM -- reserved --> BG
+    BG --> RUNNER
+    BG -- on exception --> DEGRADED
+
+    RUNNER --> SYS_PROMPT
+    RUNNER --> HOOKS
+    RUNNER --> EXEC
+    EXEC --> STATE
+
+    EXEC -. calls .-> T_SEG
+    EXEC -. calls .-> T_RAG
+    EXEC -. calls .-> T_CAMP
+    EXEC -. calls .-> T_FIN
+
+    T_SEG --> COMPILER
+    T_RAG --> RAG
+    T_CAMP --> CAMP_SERV
+    T_FIN --> STATE
+
+    COMPILER --> SRC_DB
+    COMPILER --> APP_DB
+    RAG --> MD_FILES
+    RAG --> RAG_CACHE
+    CAMP_SERV --> APP_DB
+
+    DEGRADED --> KW_DSL
+    DEGRADED --> CAMP_SERV
+
+    GET_RUNS --> APP_DB
+```
+
+### 1. Request Entry & Concurrency (FastAPI & Idempotency)
+
+- Requests arrive at `POST /copilot/run` and are immediately reserved using an atomic database check (`idempotency.py`).
+- Concurrent duplicate requests are blocked with a `409 Conflict`. Already completed keys immediately replay their cached responses from the `runs` table inside `app.sqlite` without calling the LLM.
+- Safe background execution is handled asynchronously to prevent client timeouts.
+
+### 2. Asynchronous Agent Core (Agents SDK)
+
+- Spawned runner instances evaluate the goal dynamically against dynamic prompts containing database values (active countries, platforms, plans, lifecycle stages, features, and event names).
+- A mutable `PlannerState` context tracks segment compile results, generated campaign IDs, and terminal actions.
+- `TracingHooks` capture latency, tokens, system prompts, conversation history snapshots, and model response details (including requested tool calls).
+
+### 3. Tool Execution (`ToolExecutor`)
+
+- All tool invocations are wrapped to validate arguments against strict Pydantic models (turning JSON issues into correctable context errors for the model).
+- Tool implementations route directly to the core feature business logic:
+  - **`query_segment`** compiles structured segmentation DSL rules into parameterized SQL parameters and executes them.
+  - **`search_guidelines`** performs a hybrid BM25 + dense embedding vector search (with reciprocal rank fusion) over the guideline documents.
+  - **`create_campaign`** validates payload limits and saves the campaign draft to `app.sqlite`.
+
+### 4. Graceful Degradation (Fallback Planner)
+
+- If the agent loop fails (e.g. LLM failure or turn budgets exceeded), the system catches the exception and falls back to a zero-LLM keyword-to-DSL mapping algorithm that matches goal cues (e.g., "winback", "new") to target lifecycle stages, creating a grounded default campaign.
+
+---
+
 ## Highlights
 
 - **Grounded outcomes, never the model's prose.** A campaign's `segment_size` is a real query count and
   the result is derived from a typed `PlannerState` (was a campaign actually persisted?), not from what
-  the model claims — a run that *says* it succeeded but never created anything is rejected.
+  the model claims — a run that _says_ it succeeded but never created anything is rejected.
 - **Resilience in depth.** An ordered `LLM_MODELS` fallback chain rotates on per-call errors; if the
   whole agent path still fails (every model down, `max_turns`, wall-clock budget), a **deterministic
   degraded planner** still returns a grounded, idempotent campaign with zero LLM.
@@ -68,7 +170,6 @@ and the embedding endpoint/key.
 uv run uvicorn main:app --reload
 ```
 
-
 Then check it's up:
 
 ```bash
@@ -76,7 +177,6 @@ curl http://127.0.0.1:8000/health
 ```
 
 Interactive API docs are at <http://127.0.0.1:8000/docs>.
-
 
 ## Embed Guidelines
 
@@ -158,40 +258,40 @@ metrics.
 ### Data layer
 
 - When the app DB is first created, we populate it from the source in a separate `app.sqlite`: a
-lowercased, indexed **`users`** profile copy, plus two tables aggregated from the event log -
-**`user_metrics`** (one row per user - last-activity timestamps, `days_since_*`, 30-day activity counts,
-`purchase_count`/`is_payer`, `total_events`, `lifecycle_stage`) and **`user_features`** (a normalized
-user↔feature set).
+  lowercased, indexed **`users`** profile copy, plus two tables aggregated from the event log -
+  **`user_metrics`** (one row per user - last-activity timestamps, `days_since_*`, 30-day activity counts,
+  `purchase_count`/`is_payer`, `total_events`, `lifecycle_stage`) and **`user_features`** (a normalized
+  user↔feature set).
 
 ### Segments
 
 - A segment is a flat `match` (`all`/`any`) over typed leaf predicates: profile (`country`/`plan`/
-`platform`), behavioral (`days_since_*`, `purchase_count`, `is_payer`, `lifecycle_stage`), feature
-adoption (`used`/`not_used_feature`), and windowed frequency (`event_count`). 
+  `platform`), behavioral (`days_since_*`, `purchase_count`, `is_payer`, `lifecycle_stage`), feature
+  adoption (`used`/`not_used_feature`), and windowed frequency (`event_count`).
 - A pure compiler turns the
-definition into `(from, where, params)` with every value bound - profile predicates join `users`,
-behavioral ones read `user_metrics`, feature ones are `EXISTS` over `user_features`, and `event_count`
-is a windowed subquery over `events`. `POST /segments/preview` runs it and returns the count,
-`pct_of_base`, a small `users` sample, and the `empty`/`too_broad` flags - all with no LLM. Value
-matching is case-insensitive.
+  definition into `(from, where, params)` with every value bound - profile predicates join `users`,
+  behavioral ones read `user_metrics`, feature ones are `EXISTS` over `user_features`, and `event_count`
+  is a windowed subquery over `events`. `POST /segments/preview` runs it and returns the count,
+  `pct_of_base`, a small `users` sample, and the `empty`/`too_broad` flags - all with no LLM. Value
+  matching is case-insensitive.
 
 ### Campaigns & idempotency
 
 - `POST /copilot/run` (agent) use an idempotency path: `reserve(key)`
-does an `INSERT OR IGNORE` and either returns `reserved` (the caller does the work, then `complete()`
-caches the response JSON) or reads the existing row (`completed` → return the cached response;
-`in_progress` → 409). 
+  does an `INSERT OR IGNORE` and either returns `reserved` (the caller does the work, then `complete()`
+  caches the response JSON) or reads the existing row (`completed` → return the cached response;
+  `in_progress` → 409).
 - A handled failure calls `release()` to drop the in-progress row so the client can
-retry; a missing header is a 400 (the required `Header(...)` surfaces through the same validation→400
-handler). For `POST /copilot/run` the reservation is taken synchronously before returning the 202; the
-background task runs the agent and calls `complete()` when done. 
+  retry; a missing header is a 400 (the required `Header(...)` surfaces through the same validation→400
+  handler). For `POST /copilot/run` the reservation is taken synchronously before returning the 202; the
+  background task runs the agent and calls `complete()` when done.
 - A completed key short-circuits to
-200 with the cached `trace_id` — the agent never re-runs. `create_campaign` is a plain insert that
-grounds `segment_size` through the segment compiler and enforces the reach cap, so idempotency stays
-a single cross-cutting reservation wrapping either a direct create or a whole agent run rather than
-per-write logic.
--  Messages persist as a discriminated-union JSON blob with `channel`/`image_url`
-derived from the message so they can never disagree with it.
+  200 with the cached `trace_id` — the agent never re-runs. `create_campaign` is a plain insert that
+  grounds `segment_size` through the segment compiler and enforces the reach cap, so idempotency stays
+  a single cross-cutting reservation wrapping either a direct create or a whole agent run rather than
+  per-write logic.
+- Messages persist as a discriminated-union JSON blob with `channel`/`image_url`
+  derived from the message so they can never disagree with it.
 
 ## Agent Design
 
@@ -199,74 +299,74 @@ The agent runs on the **OpenAI Agents SDK** over any OpenAI-compatible chat endp
 steps_ - there is no hardcoded tool order - and is driven through `POST /copilot/run`.
 
 - **Fire-and-forget entry point.** `POST /copilot/run` reserves the idempotency key, persists a
-placeholder `in_progress` trace, then returns `202 {trace_id}` immediately. The agent runs in a
-FastAPI `BackgroundTask`; clients poll `GET /runs/{trace_id}` for status and the created campaign.
-A completed key short-circuits to `200 {trace_id, already_exists}` with no task spawned.
+  placeholder `in_progress` trace, then returns `202 {trace_id}` immediately. The agent runs in a
+  FastAPI `BackgroundTask`; clients poll `GET /runs/{trace_id}` for status and the created campaign.
+  A completed key short-circuits to `200 {trace_id, already_exists}` with no task spawned.
 
 - **Planning loop, outcome derived from state (not prose).** The agent decides which tools to call and
-when; the run is bounded by `max_turns` (SDK loop cap), the per-call `LLM_TIMEOUT_S` on the HTTP client,
-_and_ a wall-clock `RUN_BUDGET_S` backstop (`asyncio.wait_for`) so a genuinely hung run on a slow/open
-model still terminates into the fallback path. There is deliberately no forced json response:
-a response format makes weaker OpenAI-compatible models skip tool-calling and fabricate a final answer. Instead `tool_use_behavior` ends the loop the moment a \_real
-terminal effect* lands - a campaign was persisted, or the `finish` tool was called - and the outcome is
-read from a typed `PlannerState`, never the model's text. The `finish` tool is how the agent **declines
-cleanly**: `unsupported` for a goal the segment DSL can't express (lookalike / ML segments, cross-user
-similarity) or `needs_clarification` with one specific question - instead of looping to `max_turns` or
-inventing a campaign.
+  when; the run is bounded by `max_turns` (SDK loop cap), the per-call `LLM_TIMEOUT_S` on the HTTP client,
+  _and_ a wall-clock `RUN_BUDGET_S` backstop (`asyncio.wait_for`) so a genuinely hung run on a slow/open
+  model still terminates into the fallback path. There is deliberately no forced json response:
+  a response format makes weaker OpenAI-compatible models skip tool-calling and fabricate a final answer. Instead `tool_use_behavior` ends the loop the moment a \_real
+  terminal effect\* lands - a campaign was persisted, or the `finish` tool was called - and the outcome is
+  read from a typed `PlannerState`, never the model's text. The `finish` tool is how the agent **declines
+  cleanly**: `unsupported` for a goal the segment DSL can't express (lookalike / ML segments, cross-user
+  similarity) or `needs_clarification` with one specific question - instead of looping to `max_turns` or
+  inventing a campaign.
 
 - **Tool Execution Layer.** Every tool is registered as a `ToolSpec` and wrapped by a single
-**ToolExecutor** middleware pipeline - argument validation → timeout (run off the event loop) → bounded
-retries → a recorded trace step - so the four tool impls stay tiny and uniform and the cross-cutting
-concerns live in one place. A failure becomes a _typed error result the model can read and recover from_
-(an over-broad segment, an invalid field), never a raw exception or stack trace leaking to the LLM. These
-tool-level timeouts/retries are a different failure domain from the model-level retries in the LLM client.
+  **ToolExecutor** middleware pipeline - argument validation → timeout (run off the event loop) → bounded
+  retries → a recorded trace step - so the four tool impls stay tiny and uniform and the cross-cutting
+  concerns live in one place. A failure becomes a _typed error result the model can read and recover from_
+  (an over-broad segment, an invalid field), never a raw exception or stack trace leaking to the LLM. These
+  tool-level timeouts/retries are a different failure domain from the model-level retries in the LLM client.
 
 - **Four tools.** `query_segment` compiles the DSL to SQL and returns a real count + sample;
-`search_guidelines` is the RAG tool (below); `create_campaign` assembles the channel message from flat
-fields, validates it, and idempotently persists the draft; `finish` is the terminal decline. The
-dataset's _real_ vocabulary - countries, platforms, plans, lifecycle stages, features, event names,
-predicate fields - is injected into the **system prompt** (built at agent construction by querying the
-read-models), so the model builds valid predicates without a separate lookup tool. `create_campaign`
-takes deliberately **flat fields** (channel + `title`/`body`/… rather than a discriminated-union message)
-and reads the audience from the last `query_segment` result on `PlannerState`, so a weaker model never
-has to re-type the recursive segment DSL.
+  `search_guidelines` is the RAG tool (below); `create_campaign` assembles the channel message from flat
+  fields, validates it, and idempotently persists the draft; `finish` is the terminal decline. The
+  dataset's _real_ vocabulary - countries, platforms, plans, lifecycle stages, features, event names,
+  predicate fields - is injected into the **system prompt** (built at agent construction by querying the
+  read-models), so the model builds valid predicates without a separate lookup tool. `create_campaign`
+  takes deliberately **flat fields** (channel + `title`/`body`/… rather than a discriminated-union message)
+  and reads the audience from the last `query_segment` result on `PlannerState`, so a weaker model never
+  has to re-type the recursive segment DSL.
 
 - **Grounding without trusting the model's prose.** A created campaign's numbers are not whatever the model
-retyped: `create_campaign` uses the exact segment `query_segment` sized (from `PlannerState`) and
-`campaign_service` _re-runs that query itself_, so `segment_size` is a real count and an over-broad
-segment is hard-blocked at create. The response and the cached idempotency record read the `campaign_id`
-from the run context (set by the tool), not from the model's text - so a run that _claims_ success but
-never created anything is rejected rather than echoed back. A caller-supplied campaign `name` is honored
-verbatim and a `channel_hint` is woven into the agent input so the channel and copy stay consistent.
+  retyped: `create_campaign` uses the exact segment `query_segment` sized (from `PlannerState`) and
+  `campaign_service` _re-runs that query itself_, so `segment_size` is a real count and an over-broad
+  segment is hard-blocked at create. The response and the cached idempotency record read the `campaign_id`
+  from the run context (set by the tool), not from the model's text - so a run that _claims_ success but
+  never created anything is rejected rather than echoed back. A caller-supplied campaign `name` is honored
+  verbatim and a `channel_hint` is woven into the agent input so the channel and copy stay consistent.
 
 - **Resilience: fallback chain → degraded planner.** Two env-configured layers stand between a flaky
-provider and a failed run. (1) `LLM_MODELS` is an ordered chain - a `FallbackModel` rotates to the next
-model on any per-call error, all sharing one client; a single entry means no wrapper. (2) When the whole
-agent path still fails - every model down, `max_turns`, the wall-clock budget, or a loop that ends
-without persisting a campaign - the router falls back to a **deterministic degraded planner**
-(`app.core.agent.fallback`) that builds a grounded campaign with _zero LLM_: a keyword→DSL segment sized
-by a real query, a guideline-compliant templated message, created through the same idempotent path, with
-the run marked `degraded=true`. The run only truly fails (`error`, idempotency key released) if even the
-degraded planner finds no usable segment for the base.
+  provider and a failed run. (1) `LLM_MODELS` is an ordered chain - a `FallbackModel` rotates to the next
+  model on any per-call error, all sharing one client; a single entry means no wrapper. (2) When the whole
+  agent path still fails - every model down, `max_turns`, the wall-clock budget, or a loop that ends
+  without persisting a campaign - the router falls back to a **deterministic degraded planner**
+  (`app.core.agent.fallback`) that builds a grounded campaign with _zero LLM_: a keyword→DSL segment sized
+  by a real query, a guideline-compliant templated message, created through the same idempotent path, with
+  the run marked `degraded=true`. The run only truly fails (`error`, idempotency key released) if even the
+  degraded planner finds no usable segment for the base.
 
 - **Run context, not chat memory.** Tools share a typed `PlannerState` (DB handle, settings, the run trace,
-the last-sized segment, the created `campaign_id`, the `finish` outcome, and caller hints) threaded via
-the SDK's run context and _never sent to the LLM_. It is the single source of run truth: the router
-derives the final status from it, `create_campaign` reads the grounded segment from it, and a successful
-create or `finish` recorded on it is what ends the loop.
+  the last-sized segment, the created `campaign_id`, the `finish` outcome, and caller hints) threaded via
+  the SDK's run context and _never sent to the LLM_. It is the single source of run truth: the router
+  derives the final status from it, `create_campaign` reads the grounded segment from it, and a successful
+  create or `finish` recorded on it is what ends the loop.
 
 - **Observability.** Each tool call appends a step (name, status, latency, a compact summary) to a per-run
-`RunTrace`; the run records token usage and an estimated cost, persists to a `runs` table, and is
-retrievable at `GET /runs/{trace_id}` - the "debug a bad run" deliverable. The SDK's trace export to
-OpenAI's backend is disabled (`set_tracing_disabled`); the application maintains its own trace locally.
+  `RunTrace`; the run records token usage and an estimated cost, persists to a `runs` table, and is
+  retrievable at `GET /runs/{trace_id}` - the "debug a bad run" deliverable. The SDK's trace export to
+  OpenAI's backend is disabled (`set_tracing_disabled`); the application maintains its own trace locally.
 
 - **Idempotent and offline-testable.** The idempotency key is reserved synchronously before the 202 is
-returned, so a client that retries with the same key gets the cached `trace_id` and polls `GET /runs/…`
-rather than triggering a second agent run. The whole orchestration is tested with no LLM key by
-driving the real SDK `Runner` loop with a scripted model over the real tools - the happy path, trace
-persistence, idempotent replay, the clean `unsupported` decline, a run that ends without a terminal tool
-(honest `error`), and the resilience path: a model that always raises degrades to a grounded campaign,
-and that degraded run is itself idempotent on retry.
+  returned, so a client that retries with the same key gets the cached `trace_id` and polls `GET /runs/…`
+  rather than triggering a second agent run. The whole orchestration is tested with no LLM key by
+  driving the real SDK `Runner` loop with a scripted model over the real tools - the happy path, trace
+  persistence, idempotent replay, the clean `unsupported` decline, a run that ends without a terminal tool
+  (honest `error`), and the resilience path: a model that always raises degrades to a grounded campaign,
+  and that degraded run is itself idempotent on retry.
 
 ## RAG
 
@@ -274,39 +374,39 @@ The agent grounds its recommendations in the messaging guidelines under [`guidel
 (17 short markdown docs, ~6–7k tokens total) through a `search_guidelines` tool.
 
 - **Ingestion - built at startup, cached on disk.** On boot the server ingests the corpus once
-(chunk → embed → index) inside the FastAPI lifespan, mirroring how the segment read-models are built.
-Embeddings are cached to disk keyed by a hash of the corpus + embedding model, so the first run embeds
-in a single batch call and every later run loads from cache with no network. `GET /health` reports
-`embeddings_loaded` only once the index is ready - a healthy server is a ready server, and nothing is
-lazily embedded on the request hot path. Ingestion is also available as a standalone `campaign-ingest`
-command to pre-warm the cache (e.g. in a Docker build) or re-embed after editing a guideline.
+  (chunk → embed → index) inside the FastAPI lifespan, mirroring how the segment read-models are built.
+  Embeddings are cached to disk keyed by a hash of the corpus + embedding model, so the first run embeds
+  in a single batch call and every later run loads from cache with no network. `GET /health` reports
+  `embeddings_loaded` only once the index is ready - a healthy server is a ready server, and nothing is
+  lazily embedded on the request hot path. Ingestion is also available as a standalone `campaign-ingest`
+  command to pre-warm the cache (e.g. in a Docker build) or re-embed after editing a guideline.
 
 - **Chunking - one chunk per document.** Each guideline is a single, self-contained topic, so the whole
-doc is the retrieval and citation unit (`doc_id` = the file's numeric prefix). Splitting by `##` heading
-would fragment the corpus into ~60-word pieces that embed poorly and drop each doc's lead paragraph; at
-this size doc-level chunks are both more coherent and easier to cite. `guidelines/README.md` (a table of
-contents, not guidance) is excluded.
+  doc is the retrieval and citation unit (`doc_id` = the file's numeric prefix). Splitting by `##` heading
+  would fragment the corpus into ~60-word pieces that embed poorly and drop each doc's lead paragraph; at
+  this size doc-level chunks are both more coherent and easier to cite. `guidelines/README.md` (a table of
+  contents, not guidance) is excluded.
 
 - **Retrieval - hybrid dense + BM25, fused with RRF.** Every query runs both a dense (embedding cosine)
-search and a BM25 lexical search, combined with Reciprocal Rank Fusion. BM25 carries the corpus's hard
-jargon ("120 characters", "preheader", "deep link") where embeddings can blur an exact constraint; dense
-covers paraphrase ("bring users back" → "win-back").
+  search and a BM25 lexical search, combined with Reciprocal Rank Fusion. BM25 carries the corpus's hard
+  jargon ("120 characters", "preheader", "deep link") where embeddings can blur an exact constraint; dense
+  covers paraphrase ("bring users back" → "win-back").
 
 - **Grounding.** `search_guidelines` returns each chunk's `doc_id`, title, body, and score. The agent
-issue several targeted queries per goal (channel rules, copy limits, incentives, the relevant lifecycle
-playbook), apply what it retrieved, and cite only the `doc_id`s it actually used. Grounding currently
-relies on the prompt plus mechanical create-time checks (real segment size, reach cap); programmatically
-rejecting citations the agent cannot trace back to a retrieval result is a future enhancement.
+  issue several targeted queries per goal (channel rules, copy limits, incentives, the relevant lifecycle
+  playbook), apply what it retrieved, and cite only the `doc_id`s it actually used. Grounding currently
+  relies on the prompt plus mechanical create-time checks (real segment size, reach cap); programmatically
+  rejecting citations the agent cannot trace back to a retrieval result is a future enhancement.
 
 - **Testing.** Both halves of the baseline - dense (embedding cosine) and BM25 lexical - and their RRF
-fusion are tested offline against a small committed fixture of recorded vectors
-(`tests/fixtures/guideline_vectors.npz`), so no key or network is needed. Each asserts the expected
-guidelines land in the top-k; the dense half also covers a paraphrase ("how often…" → frequency capping)
-that lexical matching alone wouldn't.
+  fusion are tested offline against a small committed fixture of recorded vectors
+  (`tests/fixtures/guideline_vectors.npz`), so no key or network is needed. Each asserts the expected
+  guidelines land in the top-k; the dense half also covers a paraphrase ("how often…" → frequency capping)
+  that lexical matching alone wouldn't.
 
 ## Evaluation
 
-A small harness in [`eval/`](eval/) measures whether the agent produces *reasonable* segments and
+A small harness in [`eval/`](eval/) measures whether the agent produces _reasonable_ segments and
 campaigns — the instinct to measure quality in a non-deterministic system, not a full eval framework.
 The latest run is committed at **[eval/REPORT.md](eval/REPORT.md)**; regenerate with:
 
@@ -314,16 +414,16 @@ The latest run is committed at **[eval/REPORT.md](eval/REPORT.md)**; regenerate 
 uv run campaign-eval          # Tier A always; Tier B when LLM_*/EMBED_* are set
 ```
 
-**Two tiers.** *Tier A* is deterministic and needs no network: it drives the **real** compiler,
+**Two tiers.** _Tier A_ is deterministic and needs no network: it drives the **real** compiler,
 hybrid retrieval (via the committed embeddings fixture), and agent loop over the **real dataset**, with
 a scripted model standing in for the LLM — so grounding/idempotency/observability are checked on every
-run and the command doubles as a CI gate (non-zero exit on any Tier-A failure). *Tier B* runs only when
+run and the command doubles as a CI gate (non-zero exit on any Tier-A failure). _Tier B_ runs only when
 a provider is configured: it sends each plain-English goal to the **actual agent** and scores the
 outcome with range/shape assertions (never a magic count).
 
 **Seven metrics**, per [`eval/golden_cases.py`](eval/golden_cases.py) and read mostly straight from the
 persisted `RunTrace`: five pass/fail checks — **grounding** (a campaign's size/citations come from real
-tool effects, not the model's prose), **segment** (real-data count in the expected range *and* shape),
+tool effects, not the model's prose), **segment** (real-data count in the expected range _and_ shape),
 **citations** (recall@k: expected `doc_id`s ⊆ retrieved), **dedupe** (a retried key never
 double-creates), **declines** (an out-of-DSL "lookalike" goal refuses cleanly with no campaign) — plus
 three distributions: **latency**, **tool count** (no runaway loop), and **token usage**. Counts are
@@ -443,4 +543,3 @@ different-but-valid segment still passes.
   allowlist, content safety) as deterministic pre/post steps, plus rejecting citations the agent can't
   trace back to a retrieval result, rather than trusting the prompt for those.
 - **Streaming (SSE)** via `Runner.run_streamed` for live tool / segment / draft events.
-
