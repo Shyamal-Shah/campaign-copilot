@@ -77,3 +77,36 @@ def health(request: Request) -> dict:
         "embeddings_configured": settings.embeddings_configured,
         "model_chain": settings.model_chain,
     }
+
+
+@app.get("/")
+def read_root() -> HTMLResponse:
+    """Serve index.html at root."""
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Frontend UI files not found. Make sure to place index.html in the static directory.</h1>",
+            status_code=404,
+        )
+
+
+@app.get("/static/style.css")
+def read_css() -> Response:
+    """Serve style.css."""
+    try:
+        with open("static/style.css", "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="text/css")
+    except FileNotFoundError:
+        return Response(status_code=404)
+
+
+@app.get("/static/app.js")
+def read_js() -> Response:
+    """Serve app.js."""
+    try:
+        with open("static/app.js", "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="application/javascript")
+    except FileNotFoundError:
+        return Response(status_code=404)

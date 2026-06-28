@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Campaign Copilot Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Header -->
+        <header class="main-header">
+            <div class="logo-area">
+                <div class="logo-icon">🚀</div>
+                <div>
+                    <h1>Campaign Copilot</h1>
+                    <p class="subtitle">AI Marketing Agent Dashboard</p>
+                </div>
+            </div>
+            <div class="system-status" id="system-status-container">
+                <div class="status-indicator">
+                    <span class="status-dot loading" id="status-dot"></span>
+                    <span class="status-text" id="status-text">Checking System Status...</span>
+                </div>
+                <div class="status-pills" id="status-pills">
+                    <!-- Dynamic Pills -->
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="dashboard-grid">
+            <!-- Left Column: Goal Submission & Templates -->
+            <section class="card goal-section">
+                <div class="card-header">
+                    <h2>Execute Marketing Goal</h2>
+                    <span class="card-desc">Enter your marketing objective in plain English</span>
+                </div>
+                
+                <form id="goal-form">
+                    <div class="form-group">
+                        <label for="goal-input">Marketing Goal <span class="required">*</span></label>
+                        <textarea id="goal-input" placeholder="e.g., Target US users who signed up in the last 7 days but have not completed their profile setup. Send a push notification encouraging them to finish." required></textarea>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="campaign-name">Campaign Name <span class="optional">(Optional)</span></label>
+                            <input type="text" id="campaign-name" placeholder="e.g., US Profile Setup Nudge">
+                        </div>
+                        <div class="form-group">
+                            <label for="channel-hint">Channel Hint <span class="optional">(Optional)</span></label>
+                            <select id="channel-hint">
+                                <option value="">Auto-Detect</option>
+                                <option value="push">Push Notification</option>
+                                <option value="email">Email</option>
+                                <option value="sms">SMS</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="idempotency-key">Idempotency Key</label>
+                        <div class="input-with-action">
+                            <input type="text" id="idempotency-key" readonly>
+                            <button type="button" class="btn btn-secondary btn-sm" id="regen-key-btn" title="Generate New Key">
+                                🔄 Refresh
+                            </button>
+                        </div>
+                        <span class="field-desc">Ensures safety during retries. Matches response if retried.</span>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-block" id="submit-btn">
+                        <span class="btn-text">Run Campaign Copilot</span>
+                        <span class="btn-spinner hidden"></span>
+                    </button>
+                </form>
+
+                <!-- Template Suggestions -->
+                <div class="suggestions-container">
+                    <h3>Example Goals</h3>
+                    <div class="suggestions-grid">
+                        <button class="suggest-btn" data-goal="Offer a 20% discount code WELCOME20 to US users on iOS who haven't completed any purchase in the last 30 days." data-name="iOS US Retargeting" data-channel="push">
+                            🍎 iOS Retargeting
+                        </button>
+                        <button class="suggest-btn" data-goal="Find users who have spent more than $100 and have lifecycle stage 'active'. Send them an email welcoming them to the VIP club." data-name="VIP Customer Email" data-channel="email">
+                            💎 VIP Customer Email
+                        </button>
+                        <button class="suggest-btn" data-goal="Nudge users on Android who haven't opened the app in 15 days, inviting them back to check out new features." data-name="Android Re-engagement" data-channel="push">
+                            📱 Android Re-engagement
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Agent Execution Trace & Live Output -->
+            <section class="card trace-section" id="trace-card">
+                <div class="card-header">
+                    <div class="header-with-action">
+                        <h2>Agent Trace & Log</h2>
+                        <span class="badge hidden" id="trace-status-badge">idle</span>
+                    </div>
+                    <span class="card-desc">Real-time LLM reasoning and execution steps</span>
+                </div>
+
+                <div class="trace-placeholder" id="trace-placeholder">
+                    <div class="placeholder-content">
+                        <span class="placeholder-icon">🤖</span>
+                        <h3>No Run Active</h3>
+                        <p>Submit a marketing goal on the left to start the agent. You will see live reasoning steps, tools executed, and segment generation here.</p>
+                    </div>
+                </div>
+
+                <!-- Trace Log Container -->
+                <div class="trace-log-container hidden" id="trace-log-container">
+                    <div class="run-meta-grid">
+                        <div class="meta-item">
+                            <span class="meta-label">Trace ID</span>
+                            <span class="meta-value font-mono select-all" id="meta-trace-id">-</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Duration</span>
+                            <span class="meta-value" id="meta-duration">-</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Tokens</span>
+                            <span class="meta-value" id="meta-tokens">-</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Est. Cost</span>
+                            <span class="meta-value text-accent" id="meta-cost">-</span>
+                        </div>
+                    </div>
+
+                    <div class="steps-timeline" id="steps-timeline">
+                        <!-- Dynamic Steps -->
+                    </div>
+
+                    <!-- Final Outcome Summary -->
+                    <div class="outcome-box hidden" id="outcome-box">
+                        <h3 id="outcome-title">Outcome: Success</h3>
+                        <p id="outcome-message"></p>
+                        
+                        <!-- Created Campaign Preview -->
+                        <div class="outcome-campaign hidden" id="outcome-campaign">
+                            <div class="campaign-preview-header">
+                                <span class="campaign-title-label" id="preview-campaign-name">Campaign Name</span>
+                                <span class="campaign-channel-badge" id="preview-campaign-channel">push</span>
+                            </div>
+                            <div class="campaign-preview-body">
+                                <div class="preview-field">
+                                    <span class="preview-label">Reach</span>
+                                    <span class="preview-val" id="preview-reach">0 users</span>
+                                </div>
+                                <div class="preview-field">
+                                    <span class="preview-label">Subject</span>
+                                    <span class="preview-val font-medium" id="preview-subject">-</span>
+                                </div>
+                                <div class="preview-field">
+                                    <span class="preview-label">Body</span>
+                                    <span class="preview-val font-medium" id="preview-body">-</span>
+                                </div>
+                                <div class="preview-field" id="preview-link-field">
+                                    <span class="preview-label">Link</span>
+                                    <a href="#" target="_blank" class="preview-val text-link" id="preview-link">-</a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Bottom Section: Campaigns Gallery -->
+        <section class="card campaigns-gallery">
+            <div class="card-header gallery-header" style="flex-wrap: wrap; gap: 1rem;">
+                <div class="gallery-tabs" style="display: flex; gap: 0.5rem; background: rgba(0, 0, 0, 0.2); padding: 0.25rem; border-radius: 8px; border: 1px solid var(--border-color);">
+                    <button class="tab-btn active" id="tab-campaigns" style="background: var(--primary); color: white; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-family: var(--font-title); font-size: 0.85rem; font-weight: 500; transition: all 0.2s;">Campaigns Library</button>
+                    <button class="tab-btn" id="tab-runs" style="background: transparent; color: var(--text-secondary); border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-family: var(--font-title); font-size: 0.85rem; font-weight: 500; transition: all 0.2s;">Observability Traces</button>
+                </div>
+                <div class="gallery-actions" style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary btn-sm" id="refresh-campaigns-btn">
+                        🔄 Refresh Library
+                    </button>
+                    <button class="btn btn-secondary btn-sm hidden" id="refresh-runs-btn">
+                        🔄 Refresh Traces
+                    </button>
+                </div>
+            </div>
+
+            <div class="table-container" id="campaigns-table-container">
+                <table class="campaigns-table" id="campaigns-table">
+                    <thead>
+                        <tr>
+                            <th>Campaign ID</th>
+                            <th>Name</th>
+                            <th>Channel</th>
+                            <th>Reach</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="campaigns-tbody">
+                        <tr>
+                            <td colspan="5" class="td-placeholder">Loading campaigns...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="table-container hidden" id="runs-table-container">
+                <table class="campaigns-table" id="runs-table">
+                    <thead>
+                        <tr>
+                            <th>Trace ID</th>
+                            <th>Goal / Objective</th>
+                            <th>Status</th>
+                            <th>Duration</th>
+                            <th>Tokens</th>
+                            <th>Est. Cost</th>
+                            <th>Date & Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="runs-tbody">
+                        <tr>
+                            <td colspan="7" class="td-placeholder">Loading runs...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <!-- Campaign Detail Modal -->
+    <div class="modal hidden" id="campaign-modal">
+        <div class="modal-overlay" id="modal-overlay"></div>
+        <div class="modal-content card">
+            <div class="modal-header">
+                <h2>Campaign Details</h2>
+                <button class="btn-close" id="close-modal-btn">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body-content">
+                <!-- Filled dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
